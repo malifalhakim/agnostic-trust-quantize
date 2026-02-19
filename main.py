@@ -68,11 +68,11 @@ def process_save_hybrid_model():
                     base_name = layer_name.replace(".weight", "")
                     try:
                         packed = loader_quant.get_tensor(f"{base_name}.weight_packed")
-                        scales = loader_quant.get_tensor(f"{base_name}.weight_scales")
+                        scales = loader_quant.get_tensor(f"{base_name}.weight_scale")
                         
                         noisy_weight = dequantize_packed_layer(packed, scales)
 
-                        scores = all_layers_scores[layer_name]
+                        scores = all_layers_scores[base_name]
                         hybrid_weight = TrustScoring.apply_trust_preservation(orig_weight, noisy_weight, scores, threshold)
 
                         shared_state_dict[layer_name] = hybrid_weight
