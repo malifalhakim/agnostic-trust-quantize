@@ -50,6 +50,32 @@ def clear_memory(weight=None):
     gc.collect()
     torch.cuda.empty_cache()
 
-def get_named_linears(model):
-    module = model.model.layers
-    return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
+def get_named_linears(model, modules_to_not_convert=None):
+    modules = model.model.layers
+    all_named_linears = {}
+    for i in range(len(modules)):
+        module = modules[i]
+        named_linears = {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
+        named_linears = exclude_layers_to_not_quantize(named_linears, modules_to_not_convert)
+
+        module_prefix = get_op_name(model, module) + "."
+        for name, layer in named_linears.items():
+            full_name = module_prefix + name
+            all_named_linears[full_name] = layer
+    return all_named_linears
+
+def exclude_layers_to_not_quantize(linear_layers, modules_to_not_convert):
+    if modules_to_not_convert is None:
+        return linear_layers
+
+    filtered_layers = {}
+    for name, linear_layer in linear_layers.items():
+        if not any(key in name for key in modules_to_not_convert):
+            filtered_layers[name] = linear_layer
+    return filtered_layers
+
+def get_op_name(module, op):
+    for name, m in module.named_modules():
+        if m is op:
+            return name
+    raise ValueError(f"Cannot find op {op} in module {module}")
