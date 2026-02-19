@@ -1,0 +1,6 @@
+torch 
+transformers
+pandas
+datasets
+safetensors 
+huggingface_hub
