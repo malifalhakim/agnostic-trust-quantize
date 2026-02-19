@@ -19,6 +19,10 @@ class TrustScoring:
         Calculate Trustworthiness Score for each weight in the model.
         Trustworthiness_score = Fairness_score + Safety_score
         """
+
+        # Temp return random scores
+        return {name: torch.rand_like(module.weight) for name, module in self.named_linears.items()}
+
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         
