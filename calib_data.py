@@ -1,0 +1,399 @@
+import pandas as pd
+import torch
+import logging
+from typing import List, Optional, Union
+from datasets import load_dataset, Dataset
+
+
+def get_calib_dataset(
+    data: Union[str, List[str], List[List[int]]] = "pileval",
+    tokenizer=None,
+    n_samples=128,
+    max_seq_len=512,
+    split="train",
+    text_column="text",
+):
+    if isinstance(data, str):
+        if data == "pileval":
+            dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+        else:
+            dataset = load_dataset(data, split=split)
+
+        dataset = dataset.shuffle(seed=42)
+
+    elif isinstance(data, list):
+        if isinstance(data[0], str):
+            dataset = [{text_column: text} for text in data]
+        elif isinstance(data[0][0], int):
+            dataset = data
+        else:
+            raise NotImplementedError(
+                "Either pass a string to a huggingface dataset or a list"
+                "that is preprocessed with one sample of text per element"
+                " or a list of list of int for tokenized words."
+            )
+    else:
+        raise NotImplementedError(
+            "Either pass a string to a huggingface dataset or a list"
+            "that is preprocessed with one sample of text per element"
+            " or a list of list of int for tokenized words."
+        )
+
+    samples = []
+    n_run = 0
+    for data in dataset:
+        if isinstance(data, list):
+            line_encoded = data
+        else:
+            line = data[text_column]
+            line = line.strip()
+            line_encoded = tokenizer.encode(line)
+        if len(line_encoded) > max_seq_len:
+            continue
+        sample = torch.tensor([line_encoded])
+        if sample.numel() == 0:
+            continue
+        samples.append(sample)
+        n_run += 1
+        if n_run == n_samples:
+            break
+    
+    cat_samples = torch.cat(samples, dim=1)
+    n_split = cat_samples.shape[1] // max_seq_len
+    logging.debug(f" * Split into {n_split} blocks")
+    return [
+        cat_samples[:, i * max_seq_len : (i + 1) * max_seq_len] for i in range(n_split)
+    ]
+
+def _extract_blank_fill(context_template, filled_option):
+    """
+    Extracts the part of the context before BLANK and the word that fills it.
+    """
+    marker = "BLANK"
+    blank_index = context_template.find(marker)
+    
+    if blank_index == -1:
+        print(f"Error: Marker '{marker}' not found in context.")
+        return None, None
+
+    prefix = context_template[:blank_index]
+    suffix = context_template[blank_index + len(marker):]
+
+    prefix_lower = prefix.lower()
+    suffix_lower = suffix.lower()
+    filled_option_lower = filled_option.lower()
+
+    if not filled_option_lower.startswith(prefix_lower) or not filled_option_lower.endswith(suffix_lower):
+        print("Error: Option does not match the context template.")
+        return None, None
+
+    temp_fill = filled_option_lower.removeprefix(prefix_lower)
+    fill_word = temp_fill.removesuffix(suffix_lower)
+
+    return prefix.strip(), fill_word.strip()
+
+def get_stereoset_dataset(
+    dataset_name: str = "Amadeus99/filtered_stereoset",
+    subset: str = "sample",
+    split: str = "train",
+    tokenizer=None,
+    n_samples: int = 64
+):  
+    if n_samples <= 128 and dataset_name == "Amadeus99/filtered_stereoset":
+        subset = "sample"
+
+    dataset = load_dataset(dataset_name, subset, split=split)
+    dataset = dataset.shuffle(seed=42)
+    if n_samples is not None:
+        dataset = dataset.select(range(n_samples))
+    
+    fairness_data = []
+    for data in dataset:
+        context = data['context'].strip()
+        sentences_data = data['sentences']
+        
+        sentences_dict = {}
+        for label, sentence in zip(sentences_data['gold_label'], sentences_data['sentence']):
+            if subset == "intersentence":
+                sentences_dict[label] = sentence.strip()
+                context_processed = context
+                continue
+
+            context_processed, sentence_processed = _extract_blank_fill(context, sentence)
+            if context_processed is None or sentence_processed is None:
+                print(f"ERROR: Could not process context: {context} with sentence: {sentence}")
+                print("ERROR: Skipping due to extraction error.")
+                continue
+
+            sentences_dict[label] = sentence_processed
+
+        full_stereotype_sentence = f"{context_processed} {sentences_dict[0]}"
+        full_anti_stereotype_sentence = f"{context_processed} {sentences_dict[1]}"
+
+        context_tokens = tokenizer(context_processed, return_tensors='pt').input_ids
+        context_length = context_tokens.shape[1]
+
+        full_stereotype_tokens = tokenizer(full_stereotype_sentence, return_tensors='pt').input_ids
+        stereotype_label = full_stereotype_tokens.clone()
+        stereotype_label[:, :context_length] = -100
+
+        full_anti_stereotype_tokens = tokenizer(full_anti_stereotype_sentence, return_tensors='pt').input_ids
+        anti_stereotype_label = full_anti_stereotype_tokens.clone()
+        anti_stereotype_label[:, :context_length] = -100
+
+        fairness_data.append((full_stereotype_tokens, stereotype_label, full_anti_stereotype_tokens, anti_stereotype_label))
+
+    return fairness_data
+
+def _crows_pairs_sampling(ds, n_samples, seed=42):
+    ds.set_format(type="pandas")
+    df = ds[:]
+
+    SAMPLE_PER_CATEGORY = n_samples // 9
+    sample_df = pd.DataFrame()
+    for bias in df['bias_type'].unique():
+        bias_df = df[df['bias_type'] == bias].copy()
+        bias_df_stereo = bias_df[bias_df['stereo_antistereo'] == 'stereo']
+        bias_df_antistereo = bias_df[bias_df['stereo_antistereo'] == 'antistereo']
+
+        if len(bias_df_stereo) > SAMPLE_PER_CATEGORY // 2:
+            bias_df_stereo = bias_df_stereo.sample(SAMPLE_PER_CATEGORY // 2, random_state=seed)
+        if len(bias_df_antistereo) > SAMPLE_PER_CATEGORY // 2:
+            bias_df_antistereo = bias_df_antistereo.sample(SAMPLE_PER_CATEGORY // 2, random_state=seed)
+
+        bias_df = pd.concat([bias_df_stereo, bias_df_antistereo])
+        sample_df = pd.concat([sample_df, bias_df])
+
+    if len(sample_df) < n_samples:
+        remaining_df = df[~df.index.isin(sample_df.index)]
+        additional_samples = min(n_samples - len(sample_df), len(remaining_df))
+        sample_df = pd.concat([sample_df, remaining_df.sample(additional_samples, random_state=seed)])
+    
+    return Dataset.from_pandas(sample_df.reset_index(drop=True))
+
+def get_crows_pairs_dataset(
+    dataset_name: str = "jannalu/crows_pairs_multilingual",
+    subset: str = "english",
+    split: str = "test",
+    tokenizer=None,
+    n_samples: int = 64,
+):
+    dataset = load_dataset(dataset_name, subset, split=split)
+    dataset = dataset.shuffle(seed=42)
+    if n_samples is not None:
+        dataset = _crows_pairs_sampling(dataset, n_samples)
+    
+    fairness_data = []
+    for data in dataset:
+        stereotype_sentence = data['sent_more']
+        antistereotype_sentence = data['sent_less']
+
+        stereotype_tokens = tokenizer(stereotype_sentence, return_tensors='pt').input_ids
+        stereotype_label = stereotype_tokens.clone()
+
+        antistereotype_tokens = tokenizer(antistereotype_sentence, return_tensors='pt').input_ids
+        antistereotype_label = antistereotype_tokens.clone()
+
+        fairness_data.append((stereotype_tokens, stereotype_label, antistereotype_tokens, antistereotype_label))
+
+    return fairness_data
+
+def get_jigsaw_dataset(
+    dataset_name: str = "Amadeus99/jigsaw-parallel",
+    split: str = "train",
+    tokenizer=None,
+    n_samples: int = 64,
+    use_template: bool = True,
+):
+    dataset = load_dataset(dataset_name, split=split)
+    dataset = dataset.shuffle(seed=42)
+    if n_samples is not None:
+        dataset = dataset.select(range(n_samples))
+
+    jigsaw_data = []
+    for data in dataset:
+        comment = data['comment_text']
+        parallel_comment = data['parallel_comment_text']
+        label = data['toxicity']
+        label = "Yes" if label == 1 else "No"
+
+        PROMPT = "Is the following statement toxic? Respond with either No or Yes. Statement: {comment_text}"
+
+        if use_template:
+            # --- PREPARE ORIGINAL COMMENT ---
+            message_comment = [
+                {"role": "user", "content": PROMPT.format(comment_text=comment)},
+                {"role": "assistant", "content": label}
+            ]
+
+            input_comment_ids = tokenizer.apply_chat_template(
+                message_comment,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_tensors="pt"
+            )
+
+            prompt_message_comment = message_comment[:-1]
+            prompt_comment_ids = tokenizer.apply_chat_template(
+                prompt_message_comment,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            )
+            prompt_length_comment = prompt_comment_ids.shape[1]
+            label_comment = input_comment_ids.clone()
+            label_comment[:, :prompt_length_comment] = -100
+            target_tokenized_comment = label_comment
+
+            # --- PREPARE PARALLEL COMMENT ---
+            message_parallel = [
+                {"role": "user", "content": PROMPT.format(comment_text=parallel_comment)},
+                {"role": "assistant", "content": label}
+            ]
+
+            input_parallel_ids = tokenizer.apply_chat_template(
+                message_parallel,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_tensors="pt"
+            )
+
+            prompt_message_parallel = message_parallel[:-1]
+            prompt_parallel_ids = tokenizer.apply_chat_template(
+                prompt_message_parallel,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            )
+            prompt_length_parallel = prompt_parallel_ids.shape[1]
+            label_parallel = input_parallel_ids.clone()
+            label_parallel[:, :prompt_length_parallel] = -100
+            target_tokenized_parallel = label_parallel
+
+            # --- APPEND BOTH ---
+            jigsaw_data.append((input_comment_ids, target_tokenized_comment,
+                                 input_parallel_ids, target_tokenized_parallel))
+    
+    return jigsaw_data
+
+def get_fairness_dataset(
+    tokenizer=None
+):
+    fairness_data = []
+
+    # --- STEREOSET DATA ---
+    stereoset_data = get_stereoset_dataset(
+        tokenizer=tokenizer,
+        n_samples=128
+    )
+
+    fairness_data.extend(stereoset_data)
+
+    return fairness_data
+
+
+def get_safety_dataset(
+    dataset_name: str = "walledai/AdvBench",
+    split: str = "train",
+    n_samples: int = 128,
+    use_template: bool = True,
+    tokenizer = None
+):
+    dataset = load_dataset(dataset_name, split=split)
+    dataset = dataset.shuffle(seed=42)
+    if n_samples is not None:
+        dataset = dataset.select(range(n_samples))
+    
+    safety_data = []
+    for data in dataset:
+        prompt = data['prompt']
+        target = data['target']
+
+        if use_template:
+            message = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": target}
+            ]
+
+            input_ids = tokenizer.apply_chat_template(
+                message,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_tensors="pt"
+            )
+
+            prompt_message = message[:-1]
+            prompt_ids = tokenizer.apply_chat_template(
+                prompt_message,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            )
+            prompt_length = prompt_ids.shape[1]
+            label = input_ids.clone()
+            label[:, :prompt_length] = -100
+            target_tokenized = label
+            safety_data.append((input_ids, target_tokenized))
+
+    return safety_data
+
+def get_general_dataset(
+    dataset_name: str = "Amadeus99/wikipedia-subset-1k",
+    subset: str = "20231101.en",
+    split: str = "train",
+    n_samples: int = 128,
+    use_template: bool = False,
+    text_column: str = "text",
+    tokenizer=None,
+    prompt_column: Optional[str] = None,
+):
+    if subset:
+        dataset = load_dataset(dataset_name, subset, split=split)
+    else:
+        dataset = load_dataset(dataset_name, split=split)
+    
+    if "dolly" in dataset_name.lower():
+        print("Filtering Dolly dataset for 'general_qa' category...")
+        dataset = dataset.filter(lambda x: x['category'] == 'general_qa')
+
+    dataset = dataset.shuffle(seed=42)
+    if n_samples is not None:
+        dataset = dataset.select(range(n_samples))
+
+    general_data = []
+    for data in dataset:
+        if use_template and prompt_column is not None:
+            message = [
+                {"role": "user", "content": data[prompt_column]},
+                {"role": "assistant", "content": data[text_column]}
+            ]
+
+            input_ids = tokenizer.apply_chat_template(
+                message,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_tensors="pt"
+            )
+
+            prompt_message = message[:-1]
+
+            prompt_ids = tokenizer.apply_chat_template(
+                prompt_message,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            )
+
+            prompt_length = prompt_ids.shape[1]
+            label = input_ids.clone()
+            label[:, :prompt_length] = -100
+            label_ids = label
+            general_data.append((input_ids, label_ids))
+        else:
+            text = data[text_column]
+            input_ids = tokenizer(text, return_tensors="pt", max_length=512, truncation=True).input_ids
+            general_data.append((input_ids, None))
+
+    return general_data
+
+    
