@@ -220,6 +220,12 @@ class TrustScoring:
         # =========================================================================
         print("Assembling final scores ...")
         
+        # Free up model memory before loading multiple score files
+        if hasattr(self, 'model'): del self.model
+        if hasattr(self, 'tokenizer'): del self.tokenizer
+        if hasattr(self, 'named_linears'): del self.named_linears
+        clear_memory()
+        
         # 1. Start with Fairness
         final_scores = torch.load(path_fair)
         
@@ -228,18 +234,21 @@ class TrustScoring:
         for name in final_scores:
             final_scores[name] += temp_scores[name]
         del temp_scores # Free RAM immediately
+        clear_memory()
         
         # 3. Subtract Beta * NSP
         temp_scores = torch.load(path_nsp)
         for name in final_scores:
             final_scores[name] -= (self.beta * temp_scores[name])
         del temp_scores # Free RAM
+        clear_memory()
         
         # 4. Subtract Beta * Dolly
         temp_scores = torch.load(path_dolly)
         for name in final_scores:
             final_scores[name] -= (self.beta * temp_scores[name])
         del temp_scores # Free RAM
+        clear_memory()
 
         return final_scores
 

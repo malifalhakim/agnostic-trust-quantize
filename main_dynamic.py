@@ -28,6 +28,8 @@ def process_save_hybrid_model():
     threshold = scorer.get_threshold_score(all_layers_scores)
     safety_masks = scorer.get_safety_masks(all_layers_scores, threshold)
 
+    del all_layers_scores, threshold, scorer
+
     # Step 3: Apply the Split
     model = apply_safety_split_to_model(model, safety_masks)
 
