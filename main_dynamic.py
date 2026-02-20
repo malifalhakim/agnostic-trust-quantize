@@ -18,7 +18,6 @@ def process_save_hybrid_model():
     # Step 1: Load the Model in FP16
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_PATH, 
-        torch_dtype=torch.float16, 
         device_map="cuda"
     )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
@@ -34,3 +33,6 @@ def process_save_hybrid_model():
 
     # Step 4: Save the Hybrid Model
     save_hybrid_model(model, tokenizer, OUTPUT_DIR, None, PUSH_TO_HUB, REPO_ID)
+
+if __name__ == "__main__":
+    process_save_hybrid_model()

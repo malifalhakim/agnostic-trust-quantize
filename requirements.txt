@@ -2,5 +2,7 @@ torch
 transformers
 pandas
 datasets
+bitsandbytes
+accelerate
 safetensors 
 huggingface_hub

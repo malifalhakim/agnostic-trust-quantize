@@ -27,7 +27,7 @@ class SafetyHybridLayer(nn.Module):
             w_safe = w_full * safety_mask
             self.safe_branch.weight.copy_(w_safe)
             
-            w_bulk = w_full * (~safety_mask)
+            w_bulk = w_full * (1 - safety_mask)
             self.bulk_branch.weight.copy_(w_bulk)
             
             if original_layer.bias is not None:

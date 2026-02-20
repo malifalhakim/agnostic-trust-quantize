@@ -94,6 +94,7 @@ def apply_safety_split_to_model(model, safety_masks):
                       Keys must match model.named_modules().
     """
     print(f"Applying safety split to {len(safety_masks)} layers...")
+    model_device = model.device
     
     for layer_name, mask in safety_masks.items():
         # 1. Locate the layer and its parent in the model tree
@@ -114,7 +115,7 @@ def apply_safety_split_to_model(model, safety_masks):
             continue
 
         # 2. Create the Hybrid Layer
-        hybrid_layer = SafetyHybridLayer(original_layer, mask)
+        hybrid_layer = SafetyHybridLayer(original_layer, mask.to(model_device))
         
         # 3. The Hot-Swap
         setattr(parent, child_name, hybrid_layer)
