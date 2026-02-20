@@ -96,7 +96,9 @@ def apply_safety_split_to_model(model, safety_masks):
     print(f"Applying safety split to {len(safety_masks)} layers...")
     model_device = model.device
     
-    for layer_name, mask in safety_masks.items():
+    layer_names = list(safety_masks.keys())
+    for layer_name in layer_names:
+        mask = safety_masks[layer_name]
         # 1. Locate the layer and its parent in the model tree
         if '.' in layer_name:
             parent_name, child_name = layer_name.rsplit('.', 1)
@@ -121,7 +123,11 @@ def apply_safety_split_to_model(model, safety_masks):
         setattr(parent, child_name, hybrid_layer)
         
         del original_layer
-        torch.cuda.empty_cache()
+        
+        # Remove the mask from memory immediately to free up RAM for the next layer
+        del safety_masks[layer_name]
+        del mask
+        clear_memory()
         
         print(f"Converted: {layer_name}")
 
