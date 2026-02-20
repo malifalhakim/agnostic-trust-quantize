@@ -1,8 +1,12 @@
 import torch
 import gc
+import os
+import json
 
 from torch import nn
 from safetensors.torch import load_file
+from hybrid_layer import SafetyHybridLayer
+
 
 def dequantize_packed_layer(packed_weight, scales, group_size = 128):
     """
@@ -79,3 +83,80 @@ def get_op_name(module, op):
         if m is op:
             return name
     raise ValueError(f"Cannot find op {op} in module {module}")
+
+def apply_safety_split_to_model(model, safety_masks):
+    """
+    Replaces target layers in an LLM with SafetyHybridLayer.
+    
+    Args:
+        model: The loaded LLM (in FP16/BF16).
+        safety_masks: A dict { 'layer_name': mask_tensor }. 
+                      Keys must match model.named_modules().
+    """
+    print(f"Applying safety split to {len(safety_masks)} layers...")
+    
+    for layer_name, mask in safety_masks.items():
+        # 1. Locate the layer and its parent in the model tree
+        if '.' in layer_name:
+            parent_name, child_name = layer_name.rsplit('.', 1)
+            parent = model.get_submodule(parent_name)
+        else:
+            parent_name = ""
+            child_name = layer_name
+            parent = model
+
+        # Get the original layer
+        original_layer = getattr(parent, child_name)
+        
+        # Ensure we are replacing a Linear layer
+        if not isinstance(original_layer, nn.Linear):
+            print(f"Skipping {layer_name}: Not a Linear layer.")
+            continue
+
+        # 2. Create the Hybrid Layer
+        hybrid_layer = SafetyHybridLayer(original_layer, mask)
+        
+        # 3. The Hot-Swap
+        setattr(parent, child_name, hybrid_layer)
+        
+        del original_layer
+        torch.cuda.empty_cache()
+        
+        print(f"Converted: {layer_name}")
+
+    return model
+
+def save_hybrid_model(model, tokenizer, output_dir, safety_masks=None, push_to_hub=False, repo_id=None):
+    """
+    Saves the hybrid model, tokenizer, and hybrid layer metadata.
+    Optionally pushes to Hugging Face Hub.
+    """
+    print(f"Saving hybrid model to {output_dir}...")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Save Model and Tokenizer
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    # Save metadata about which layers are hybrid (crucial for loading)
+    if safety_masks is not None:
+        hybrid_layers = list(safety_masks.keys())
+        with open(os.path.join(output_dir, "hybrid_layers.json"), "w") as f:
+            json.dump(hybrid_layers, f, indent=2)
+    
+    if push_to_hub and repo_id:
+        print(f"Pushing to Hugging Face Hub: {repo_id}")
+        model.push_to_hub(repo_id)
+        tokenizer.push_to_hub(repo_id)
+        
+        if safety_masks is not None:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            api.upload_file(
+                path_or_fileobj=os.path.join(output_dir, "hybrid_layers.json"),
+                path_in_repo="hybrid_layers.json",
+                repo_id=repo_id
+            )
+    
+    print("Model saved successfully.")

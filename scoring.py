@@ -341,7 +341,14 @@ class TrustScoring:
         k = int(score_samples.numel() * tau)
         threshold = torch.topk(score_samples.float(), k, largest=True, sorted=False)[0].min()
         return threshold
-        
+    
+    def get_safety_masks(self, all_layers_scores, threshold):
+        for name, scores in all_layers_scores.items():
+            scores[scores < threshold] = 0.0
+            scores[scores >= threshold] = 1.0
+        return all_layers_scores
+
+
     @staticmethod
     def apply_trust_preservation(orig_weight, noisy_weight, sensitivity_scores, threshold):
         """
