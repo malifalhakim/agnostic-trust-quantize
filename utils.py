@@ -136,17 +136,19 @@ def apply_safety_split_to_model(model, safety_masks):
 def save_hybrid_model(model, tokenizer, output_dir, safety_masks=None, push_to_hub=False, repo_id=None):
     """
     Saves the hybrid model, tokenizer, and hybrid layer metadata.
-    Optionally pushes to Hugging Face Hub.
+    Optimized for RAM efficiency and avoids redundant serialization.
     """
     print(f"Saving hybrid model to {output_dir}...")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Save Model and Tokenizer
-    model.save_pretrained(output_dir)
+    model.save_pretrained(
+        output_dir, 
+        safe_serialization=True, 
+        max_shard_size="2GB" 
+    )
     tokenizer.save_pretrained(output_dir)
 
-    # Save metadata about which layers are hybrid (crucial for loading)
     if safety_masks is not None:
         hybrid_layers = list(safety_masks.keys())
         with open(os.path.join(output_dir, "hybrid_layers.json"), "w") as f:
@@ -154,16 +156,14 @@ def save_hybrid_model(model, tokenizer, output_dir, safety_masks=None, push_to_h
     
     if push_to_hub and repo_id:
         print(f"Pushing to Hugging Face Hub: {repo_id}")
-        model.push_to_hub(repo_id)
-        tokenizer.push_to_hub(repo_id)
+        from huggingface_hub import HfApi
+        api = HfApi()
         
-        if safety_masks is not None:
-            from huggingface_hub import HfApi
-            api = HfApi()
-            api.upload_file(
-                path_or_fileobj=os.path.join(output_dir, "hybrid_layers.json"),
-                path_in_repo="hybrid_layers.json",
-                repo_id=repo_id
-            )
+        api.upload_folder(
+            folder_path=output_dir,
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="Upload RAM-efficient hybrid model"
+        )
     
     print("Model saved successfully.")
