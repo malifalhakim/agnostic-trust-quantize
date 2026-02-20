@@ -320,7 +320,7 @@ def get_safety_dataset(
                 tokenize=True,
                 add_generation_prompt=False,
                 return_tensors="pt"
-            )
+            ).input_ids
 
             prompt_message = message[:-1]
             prompt_ids = tokenizer.apply_chat_template(
@@ -328,7 +328,7 @@ def get_safety_dataset(
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt"
-            )
+            ).input_ids
             prompt_length = prompt_ids.shape[1]
             label = input_ids.clone()
             label[:, :prompt_length] = -100
@@ -373,7 +373,7 @@ def get_general_dataset(
                 tokenize=True,
                 add_generation_prompt=False,
                 return_tensors="pt"
-            )
+            ).input_ids
 
             prompt_message = message[:-1]
 
@@ -382,7 +382,7 @@ def get_general_dataset(
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt"
-            )
+            ).input_ids
 
             prompt_length = prompt_ids.shape[1]
             label = input_ids.clone()
